@@ -1,35 +1,9 @@
-cat > /app/bot_15m.py << 'EOF'
-import subprocess
-import sys
 import time
-import gc
-import resource
-
-# ========== ОГРАНИЧЕНИЕ ПАМЯТИ (512 MB) ==========
-try:
-    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
-    print("✅ Лимит памяти установлен: 512 MB")
-except:
-    print("⚠️ Не удалось установить лимит памяти")
-
-# ========== АВТОУСТАНОВКА БИБЛИОТЕК ==========
-def install_package(package):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
-
-for pkg in ["ccxt", "pandas", "requests"]:
-    try:
-        __import__(pkg)
-        print(f"✅ {pkg} уже установлен")
-    except ImportError:
-        print(f"📦 Устанавливаю {pkg}...")
-        install_package(pkg)
-
+import requests
 import ccxt
 import pandas as pd
-import requests
 from datetime import datetime
 
-# ========== TELEGRAM ==========
 TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
@@ -47,14 +21,12 @@ def log(msg):
 log("🚀 БОТ 15m ЗАПУЩЕН")
 send_tg("✅ Бот 15m запущен! Мониторю BTC, ETH, SOL, BNB")
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
 exchange = ccxt.binance({'enableRateLimit': True})
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 
 def get_data(symbol, limit=100):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    return df
+    return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 
 def add_indicators(df):
     df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -125,7 +97,6 @@ def check_signals(df, symbol, oi, price):
     ema200 = df['EMA200'].iloc[-1]
     atr = df['ATR'].iloc[-1]
     
-    # LONG
     if oi <= -1.5 and ema50 > ema200:
         fvg = find_fvg(df)
         if fvg and fvg[0] == 'bullish' and fvg[1] <= price <= fvg[2]:
@@ -142,7 +113,6 @@ def check_signals(df, symbol, oi, price):
                 if 1.0 <= risk <= 2.0:
                     return {'type': 'LONG', 'trigger': 'B (0.618+пин-бар)', 'entry': price, 'stop': stop, 'tp': price + (price - stop) * 1.5, 'risk': f"{risk:.1f}%", 'oi': f"{oi:.1f}%"}
     
-    # SHORT
     if oi >= 1.5 and ema50 < ema200:
         fvg = find_fvg(df)
         if fvg and fvg[0] == 'bearish' and fvg[1] <= price <= fvg[2]:
@@ -166,7 +136,6 @@ def format_signal(symbol, signal):
 Риск: {signal['risk']}
 OI: {signal['oi']}%"""
 
-# ========== ОСНОВНОЙ ЦИКЛ ==========
 log("Начинаю сканирование...")
 
 while True:
@@ -182,10 +151,8 @@ while True:
                 log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
                 msg = format_signal(symbol, signal)
                 send_tg(msg)
-            gc.collect()  # очистка памяти
         log("Ожидание 5 минут...")
         time.sleep(300)
     except Exception as e:
         log(f"Ошибка: {e}")
         time.sleep(60)
-EOF
