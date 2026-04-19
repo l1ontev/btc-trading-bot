@@ -1,8 +1,28 @@
-import os
+import subprocess
+import sys
 import time
-import requests
+
+# ========== АВТОУСТАНОВКА БИБЛИОТЕК ==========
+def install_package(package):
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--break-system-packages"])
+    except:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Устанавливаем и импортируем библиотеки
+for pkg in ["ccxt", "pandas", "requests"]:
+    try:
+        __import__(pkg)
+        print(f"✅ {pkg} уже установлен")
+    except ImportError:
+        print(f"📦 Устанавливаю {pkg}...")
+        install_package(pkg)
+        print(f"✅ {pkg} установлен")
+
+# Теперь импортируем
 import ccxt
 import pandas as pd
+import requests
 from datetime import datetime
 
 # ========== TELEGRAM ==========
@@ -13,12 +33,14 @@ def send_tg(text):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
+        print("✅ Сообщение отправлено в Telegram")
     except Exception as e:
-        print(f"Ошибка: {e}")
+        print(f"❌ Ошибка отправки: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
+# ========== ОСТАЛЬНОЙ КОД БОТА ==========
 exchange = ccxt.binance({'enableRateLimit': True})
 
 def get_data(symbol, limit=200):
