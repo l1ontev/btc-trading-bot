@@ -1,15 +1,21 @@
+cat > /app/bot_15m.py << 'EOF'
 import subprocess
 import sys
 import time
+import gc
+import resource
+
+# ========== ОГРАНИЧЕНИЕ ПАМЯТИ (512 MB) ==========
+try:
+    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    print("✅ Лимит памяти установлен: 512 MB")
+except:
+    print("⚠️ Не удалось установить лимит памяти")
 
 # ========== АВТОУСТАНОВКА БИБЛИОТЕК ==========
 def install_package(package):
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--break-system-packages"])
-    except:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--quiet"])
 
-# Устанавливаем и импортируем библиотеки
 for pkg in ["ccxt", "pandas", "requests"]:
     try:
         __import__(pkg)
@@ -17,9 +23,7 @@ for pkg in ["ccxt", "pandas", "requests"]:
     except ImportError:
         print(f"📦 Устанавливаю {pkg}...")
         install_package(pkg)
-        print(f"✅ {pkg} установлен")
 
-# Теперь импортируем
 import ccxt
 import pandas as pd
 import requests
@@ -30,26 +34,37 @@ TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
 def send_tg(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        print("✅ Сообщение отправлено в Telegram")
+        print("✅ Сообщение отправлено")
     except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
+        print(f"❌ Ошибка: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-# ========== ОСТАЛЬНОЙ КОД БОТА ==========
-exchange = ccxt.binance({'enableRateLimit': True})
+log("🚀 БОТ 15m ЗАПУЩЕН")
+send_tg("✅ Бот 15m запущен! Мониторю BTC, ETH, SOL, BNB")
 
-def get_data(symbol, limit=200):
+# ========== ИНИЦИАЛИЗАЦИЯ ==========
+exchange = ccxt.binance({'enableRateLimit': True})
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+
+def get_data(symbol, limit=100):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df
 
-def get_price(symbol):
-    return exchange.fetch_ticker(symbol)['last']
+def add_indicators(df):
+    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift())
+    low_close = abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(window=14).mean()
+    return df
 
 def get_oi(symbol):
     try:
@@ -64,15 +79,8 @@ def get_oi(symbol):
     except:
         return 0
 
-def add_indicators(df):
-    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    high_low = df['high'] - df['low']
-    high_close = abs(df['high'] - df['close'].shift())
-    low_close = abs(df['low'] - df['close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(window=14).mean()
-    return df
+def get_price(symbol):
+    return exchange.fetch_ticker(symbol)['last']
 
 def find_fvg(df):
     if len(df) < 6:
@@ -117,6 +125,7 @@ def check_signals(df, symbol, oi, price):
     ema200 = df['EMA200'].iloc[-1]
     atr = df['ATR'].iloc[-1]
     
+    # LONG
     if oi <= -1.5 and ema50 > ema200:
         fvg = find_fvg(df)
         if fvg and fvg[0] == 'bullish' and fvg[1] <= price <= fvg[2]:
@@ -133,6 +142,7 @@ def check_signals(df, symbol, oi, price):
                 if 1.0 <= risk <= 2.0:
                     return {'type': 'LONG', 'trigger': 'B (0.618+пин-бар)', 'entry': price, 'stop': stop, 'tp': price + (price - stop) * 1.5, 'risk': f"{risk:.1f}%", 'oi': f"{oi:.1f}%"}
     
+    # SHORT
     if oi >= 1.5 and ema50 < ema200:
         fvg = find_fvg(df)
         if fvg and fvg[0] == 'bearish' and fvg[1] <= price <= fvg[2]:
@@ -156,10 +166,8 @@ def format_signal(symbol, signal):
 Риск: {signal['risk']}
 OI: {signal['oi']}%"""
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-
-log("🚀 БОТ 15m ЗАПУЩЕН")
-send_tg("✅ Бот 15m запущен! Мониторю BTC, ETH, SOL, BNB")
+# ========== ОСНОВНОЙ ЦИКЛ ==========
+log("Начинаю сканирование...")
 
 while True:
     try:
@@ -174,8 +182,10 @@ while True:
                 log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
                 msg = format_signal(symbol, signal)
                 send_tg(msg)
+            gc.collect()  # очистка памяти
         log("Ожидание 5 минут...")
         time.sleep(300)
     except Exception as e:
         log(f"Ошибка: {e}")
         time.sleep(60)
+EOF
