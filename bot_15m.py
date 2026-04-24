@@ -4,9 +4,16 @@ import ccxt
 import pandas as pd
 from datetime import datetime
 
+# ========== НАСТРОЙКИ ==========
 TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+OI_THRESHOLD = 0.5          # 0.5% — низкий порог для частых сигналов
+TIMEFRAME = "15m"
+LIMIT = 100
+
+# ========== TELEGRAM ==========
 def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -18,26 +25,25 @@ def send_tg(text):
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ 15m ЗАПУЩЕН (ПОРОГ OI: 0.8%)")
-send_tg("✅ Бот перезапущен с порогом OI 0.8%")
+log("🚀 БОТ MACD+EMA+OI ЗАПУЩЕН")
+send_tg("✅ Бот (MACD+EMA+OI) запущен! Жди сигналов.")
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-OI_THRESHOLD = 0.8
-LIMIT = 100
-
+# ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
 
-def get_data(symbol, limit=LIMIT):
+def get_data(symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=limit)
-        return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return df
     except Exception as e:
         log(f"Ошибка {symbol}: {e}")
         return None
 
 def get_oi(symbol):
+    """Изменение объёма за 30 минут (простой OI)"""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=4)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=4)
         if len(ohlcv) < 4:
             return 0
         now = ohlcv[-1][5]
@@ -55,82 +61,81 @@ def get_price(symbol):
         return 0
 
 def add_indicators(df):
+    """Добавляет EMA и MACD"""
+    # EMA 50 и 200
     df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    high_low = df['high'] - df['low']
-    high_close = abs(df['high'] - df['close'].shift())
-    low_close = abs(df['low'] - df['close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(window=14).mean()
+    
+    # MACD: 12, 26, 9
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Histogram'] = df['MACD'] - df['Signal']
+    
     return df
 
-def find_fvg(df):
-    if len(df) < 10:
-        return None
-    for offset in [3, 4, 5]:
-        i = len(df) - offset
-        if i < 2 or i >= len(df) - 1:
-            continue
-        try:
-            if df['high'].iloc[i-1] < df['low'].iloc[i+1]:
-                return ('bullish', df['high'].iloc[i-1], df['low'].iloc[i+1])
-            elif df['low'].iloc[i-1] > df['high'].iloc[i+1]:
-                return ('bearish', df['high'].iloc[i+1], df['low'].iloc[i-1])
-        except:
-            continue
-    return None
-
 def check_signals(df, symbol, oi, price):
-    if df is None or len(df) < 30:
+    if df is None or len(df) < 35:
         return None
     
     ema50 = df['EMA50'].iloc[-1]
     ema200 = df['EMA200'].iloc[-1]
-    atr = df['ATR'].iloc[-1]
     
-    if oi <= -OI_THRESHOLD and ema50 > ema200:
-        fvg = find_fvg(df)
-        if fvg and fvg[0] == 'bullish' and fvg[1] <= price <= fvg[2]:
-            stop = price - atr * 1.2
-            risk = (price - stop) / price * 100
-            if 0.5 <= risk <= 2.5:
-                return {'type': 'LONG', 'trigger': 'A (FVG)', 'entry': price, 'stop': stop, 'tp': price + (price - stop) * 1.5, 'risk': f"{risk:.1f}%", 'oi': f"{oi:.1f}%"}
+    # MACD пересечения
+    macd_now = df['MACD'].iloc[-1]
+    signal_now = df['Signal'].iloc[-1]
+    macd_prev = df['MACD'].iloc[-2]
+    signal_prev = df['Signal'].iloc[-2]
     
-    if oi >= OI_THRESHOLD and ema50 < ema200:
-        fvg = find_fvg(df)
-        if fvg and fvg[0] == 'bearish' and fvg[1] <= price <= fvg[2]:
-            stop = price + atr * 1.2
-            risk = (stop - price) / price * 100
-            if 0.5 <= risk <= 2.5:
-                return {'type': 'SHORT', 'trigger': 'A (FVG)', 'entry': price, 'stop': stop, 'tp': price - (stop - price) * 1.5, 'risk': f"{risk:.1f}%", 'oi': f"{oi:.1f}%"}
+    # LONG: MACD пересекает сигнальную снизу вверх + EMA50 > EMA200 + OI падает
+    if (macd_prev <= signal_prev and macd_now > signal_now and 
+        ema50 > ema200 and oi <= -OI_THRESHOLD):
+        return {'type': 'LONG', 'entry': price, 'oi': f"{oi:.1f}%"}
+    
+    # SHORT: MACD пересекает сигнальную сверху вниз + EMA50 < EMA200 + OI растёт
+    if (macd_prev >= signal_prev and macd_now < signal_now and 
+        ema50 < ema200 and oi >= OI_THRESHOLD):
+        return {'type': 'SHORT', 'entry': price, 'oi': f"{oi:.1f}%"}
     
     return None
 
 log("Начинаю сканирование...")
 
+# ========== ОСНОВНОЙ ЦИКЛ ==========
 while True:
     try:
         for symbol in SYMBOLS:
             df = get_data(symbol)
             if df is None:
                 continue
+            
             df = add_indicators(df)
             oi = get_oi(symbol)
             price = get_price(symbol)
             signal = check_signals(df, symbol, oi, price)
+            
             if signal:
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} СИГНАЛ {signal['type']}
+                msg = f"""{emoji} СИГНАЛ {signal['type']} ({TIMEFRAME})
 
-{symbol} | {signal['trigger']}
-💰 Вход: ${signal['entry']:.0f}
-📉 Стоп: ${signal['stop']:.0f}
-🎯 Тейк: ${signal['tp']:.0f}
-📐 Риск: {signal['risk']}
-🔥 OI: {signal['oi']}%"""
+{symbol}
+💰 Вход: ${price:.0f}
+🔥 OI за 30мин: {signal['oi']}
+📊 MACD пересечение + EMA + OI
+
+⚠️ Управляй рисками!"""
                 send_tg(msg)
-                log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
-        time.sleep(300)
+                log(f"🔥 {symbol} {signal['type']} | OI: {signal['oi']}")
+            else:
+                # Диагностика раз в 20 циклов (≈1.5 часа)
+                if int(time.time()) % 3600 < 30:
+                    ema50 = df['EMA50'].iloc[-1]
+                    ema200 = df['EMA200'].iloc[-1]
+                    log(f"Диагностика {symbol}: цена={price:.0f}, OI={oi:.1f}%, EMA50/200={ema50:.0f}/{ema200:.0f}")
+        
+        time.sleep(300)  # 5 минут
+        
     except Exception as e:
         log(f"Ошибка: {e}")
         time.sleep(60)
