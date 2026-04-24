@@ -7,4 +7,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot_15m.py .
 
+# Принудительно запускаем Python скрипт
 CMD ["python", "bot_15m.py"]
