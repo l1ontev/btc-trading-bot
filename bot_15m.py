@@ -18,8 +18,8 @@ def send_tg(text):
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ 15m ЗАПУЩЕН (ПОРОГ 0.8%)")
-send_tg("✅ Бот запущен с порогом OI 0.8%")
+log("🚀 БОТ 15m ЗАПУЩЕН (ПОРОГ OI: 0.8%)")
+send_tg("✅ Бот перезапущен с порогом OI 0.8%")
 
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 OI_THRESHOLD = 0.8
@@ -120,7 +120,14 @@ while True:
             signal = check_signals(df, symbol, oi, price)
             if signal:
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} {signal['type']} {symbol} | {signal['trigger']}\n💰 {signal['entry']:.0f}\n📉 {signal['stop']:.0f}\n🎯 {signal['tp']:.0f}\n📐 {signal['risk']}\n🔥 OI: {signal['oi']}%"""
+                msg = f"""{emoji} СИГНАЛ {signal['type']}
+
+{symbol} | {signal['trigger']}
+💰 Вход: ${signal['entry']:.0f}
+📉 Стоп: ${signal['stop']:.0f}
+🎯 Тейк: ${signal['tp']:.0f}
+📐 Риск: {signal['risk']}
+🔥 OI: {signal['oi']}%"""
                 send_tg(msg)
                 log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
         time.sleep(300)
