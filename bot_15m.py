@@ -1,10 +1,10 @@
+cat > /app/bot_15m.py << 'EOF'
 import time
 import requests
 import ccxt
 import pandas as pd
 from datetime import datetime
 
-# ========== НАСТРОЙКИ ==========
 TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
@@ -17,7 +17,6 @@ STOP_ATR_MULTIPLIER = 1.2
 RR_RATIO = 3.0
 SCAN_INTERVAL = 300
 
-# ========== TELEGRAM ==========
 def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -29,10 +28,9 @@ def send_tg(text):
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("BOT STARTED (FVG+EMA+OI RR1:3)")
+log("BOT STARTED")
 send_tg("BOT STARTED (FVG+EMA+OI RR1:3)")
 
-# ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
 
 def get_data(symbol):
@@ -56,12 +54,10 @@ def add_indicators(df):
 def find_fvg(df, idx):
     if idx < 2 or idx >= len(df) - 1:
         return None
-    # bullish FVG
     if df['h'].iloc[idx-1] < df['l'].iloc[idx+1]:
         return ('bullish', df['h'].iloc[idx-1], df['l'].iloc[idx+1'])
-    # bearish FVG
     if df['l'].iloc[idx-1] > df['h'].iloc[idx+1]:
-        return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1'])
+        return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1])
     return None
 
 def get_oi_change(df, idx):
@@ -76,7 +72,6 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
     if not fvg:
         return None
 
-    # LONG
     if oi <= OI_THRESHOLD_LONG and ema50 > ema200 and fvg[0] == 'bullish' and fvg[1] <= price <= fvg[2]:
         stop = price - atr * STOP_ATR_MULTIPLIER
         risk = price - stop
@@ -88,7 +83,6 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
             'risk_pct': round(risk / price * 100, 2)
         }
 
-    # SHORT
     if oi >= OI_THRESHOLD_SHORT and ema50 < ema200 and fvg[0] == 'bearish' and fvg[1] <= price <= fvg[2]:
         stop = price + atr * STOP_ATR_MULTIPLIER
         risk = stop - price
@@ -102,7 +96,6 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
 
     return None
 
-# ========== MAIN LOOP ==========
 log("Starting scan...")
 
 while True:
@@ -125,13 +118,7 @@ while True:
 
             if signal:
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} {signal['type']} {symbol}
-Entry: ${signal['entry']:.0f}
-Stop: ${signal['stop']:.0f}
-TP: ${signal['tp']:.0f}
-Risk: {signal['risk_pct']}%
-OI: {oi:.1f}%
-RR 1:3"""
+                msg = f"{emoji} {signal['type']} {symbol}\nEntry: ${signal['entry']:.0f}\nStop: ${signal['stop']:.0f}\nTP: ${signal['tp']:.0f}\nRisk: {signal['risk_pct']}%\nOI: {oi:.1f}%\nRR 1:3"
                 send_tg(msg)
                 log(f"SIGNAL {symbol} {signal['type']}")
 
@@ -140,3 +127,4 @@ RR 1:3"""
     except Exception as e:
         log(f"Loop error: {e}")
         time.sleep(60)
+EOF
