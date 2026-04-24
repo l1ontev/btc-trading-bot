@@ -9,28 +9,28 @@ TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-OI_THRESHOLD = 0.5
 TIMEFRAME = "15m"
 LIMIT = 100
+OI_THRESHOLD_LONG = -0.8
+OI_THRESHOLD_SHORT = 0.8
 STOP_ATR_MULTIPLIER = 1.2
-RR_RATIO = 2.0
+RR_RATIO = 3.0
 SCAN_INTERVAL = 300
-HEARTBEAT_INTERVAL = 3600
 
 # ========== TELEGRAM ==========
 def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        print("✅ Отправлено")
+        print("✅ Сообщение отправлено")
     except Exception as e:
         print(f"❌ Ошибка: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ MACD+EMA+OI ЗАПУЩЕН")
-send_tg("✅ Бот (MACD+EMA+OI) запущен! Жди сигналов.")
+log("🚀 БОТ FVG+EMA+OI (RR 1:3) ЗАПУЩЕН")
+send_tg("✅ Бот (FVG+EMA+OI, RR 1:3) запущен!")
 
 # ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
@@ -38,107 +38,110 @@ exchange = ccxt.binance({'enableRateLimit': True})
 def get_data(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-        return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
     except Exception as e:
         log(f"Ошибка {symbol}: {e}")
         return None
 
-def get_oi(symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=4)
-        if len(ohlcv) < 4:
-            return 0
-        now = ohlcv[-1][5]
-        past = ohlcv[-3][5]
-        if past == 0:
-            return 0
-        return round((now - past) / past * 100, 2)
-    except:
-        return 0
-
-def get_price(symbol):
-    try:
-        return exchange.fetch_ticker(symbol)['last']
-    except:
-        return 0
-
 def add_indicators(df):
-    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = exp1 - exp2
-    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    high_low = df['high'] - df['low']
-    high_close = abs(df['high'] - df['close'].shift())
-    low_close = abs(df['low'] - df['close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(window=14).mean()
+    df['ema50'] = df['c'].ewm(50).mean()
+    df['ema200'] = df['c'].ewm(200).mean()
+    tr = pd.concat([
+        df['h'] - df['l'],
+        abs(df['h'] - df['c'].shift()),
+        abs(df['l'] - df['c'].shift())
+    ], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(14).mean()
     return df
 
-def check_signals(df, symbol, oi, price):
-    if df is None or len(df) < 35:
+def find_fvg(df, idx):
+    if idx < 2 or idx >= len(df)-1:
         return None
-    ema50 = df['EMA50'].iloc[-1]
-    ema200 = df['EMA200'].iloc[-1]
-    atr = df['ATR'].iloc[-1]
-    macd_now = df['MACD'].iloc[-1]
-    signal_now = df['Signal'].iloc[-1]
-    macd_prev = df['MACD'].iloc[-2]
-    signal_prev = df['Signal'].iloc[-2]
-    
-    if (macd_prev <= signal_prev and macd_now > signal_now and 
-        ema50 > ema200 and oi <= -OI_THRESHOLD):
-        stop = price - atr * STOP_ATR_MULTIPLIER
-        risk = price - stop
-        return {'type': 'LONG', 'entry': price, 'stop': stop, 'tp': price + risk * RR_RATIO, 'risk_pct': round((risk/price)*100,1), 'oi': f"{oi:.1f}%"}
-    
-    if (macd_prev >= signal_prev and macd_now < signal_now and 
-        ema50 < ema200 and oi >= OI_THRESHOLD):
-        stop = price + atr * STOP_ATR_MULTIPLIER
-        risk = stop - price
-        return {'type': 'SHORT', 'entry': price, 'stop': stop, 'tp': price - risk * RR_RATIO, 'risk_pct': round((risk/price)*100,1), 'oi': f"{oi:.1f}%"}
-    
+    if df['h'].iloc[idx-1] < df['l'].iloc[idx+1]:
+        return ('bullish', df['h'].iloc[idx-1], df['l'].iloc[idx+1'])
+    if df['l'].iloc[idx-1] > df['h'].iloc[idx+1]:
+        return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1])
     return None
 
-last_heartbeat = 0
-last_signal_time = time.time()
+def get_oi_change(df, idx):
+    if idx < 2:
+        return 0
+    now = df['v'].iloc[idx]
+    past = df['v'].iloc[idx-2]
+    return round((now-past)/past*100, 2) if past != 0 else 0
+
+def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
+    fvg = find_fvg(df, idx)
+    if not fvg:
+        return None
+
+    # LONG
+    if oi <= OI_THRESHOLD_LONG and ema50 > ema200 and fvg[0] == 'bullish' and fvg[1] <= price <= fvg[2]:
+        stop = price - atr * STOP_ATR_MULTIPLIER
+        risk = price - stop
+        return {
+            'type': 'LONG',
+            'entry': price,
+            'stop': stop,
+            'tp': price + risk * RR_RATIO,
+            'risk_pct': round(risk/price*100, 2)
+        }
+
+    # SHORT
+    if oi >= OI_THRESHOLD_SHORT and ema50 < ema200 and fvg[0] == 'bearish' and fvg[1] <= price <= fvg[2]:
+        stop = price + atr * STOP_ATR_MULTIPLIER
+        risk = stop - price
+        return {
+            'type': 'SHORT',
+            'entry': price,
+            'stop': stop,
+            'tp': price - risk * RR_RATIO,
+            'risk_pct': round(risk/price*100, 2)
+        }
+
+    return None
+
+# ========== ОСНОВНОЙ ЦИКЛ ==========
 log("Начинаю сканирование...")
 
 while True:
     try:
-        signal_found = False
         for symbol in SYMBOLS:
             df = get_data(symbol)
-            if df is None: continue
-            df = add_indicators(df)
-            oi = get_oi(symbol)
-            price = get_price(symbol)
-            signal = check_signals(df, symbol, oi, price)
-            if signal:
-                signal_found = True
-                last_signal_time = time.time()
-                emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} {signal['type']} {symbol}
+            if df is None or len(df) < 80:
+                continue
 
+            df = add_indicators(df)
+            last_idx = len(df) - 1
+
+            price = df['c'].iloc[last_idx]
+            oi = get_oi_change(df, last_idx)
+            ema50 = df['ema50'].iloc[last_idx]
+            ema200 = df['ema200'].iloc[last_idx]
+            atr = df['atr'].iloc[last_idx]
+
+            signal = check_signals(df, symbol, oi, price, atr, ema50, ema200, last_idx)
+
+            if signal:
+                emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
+                msg = f"""{emoji} СИГНАЛ {signal['type']} ({TIMEFRAME})
+
+{symbol}
 💰 Вход: ${signal['entry']:.0f}
 📉 Стоп: ${signal['stop']:.0f}
 🎯 Тейк: ${signal['tp']:.0f}
 📐 Риск: {signal['risk_pct']}%
-🔥 OI: {signal['oi']}
 
-⚡ 1:{RR_RATIO}"""
+🔥 OI за 30мин: {oi:.1f}%
+📊 FVG + EMA50/200 + OI
+⚡ 1:{RR_RATIO}
+
+⚠️ Управляй рисками!"""
                 send_tg(msg)
-                log(f"🔥 {symbol} {signal['type']}")
-        
-        if not signal_found and (time.time() - last_heartbeat) >= HEARTBEAT_INTERVAL:
-            last_heartbeat = time.time()
-            hours = int((time.time() - last_signal_time) / 3600)
-            msg = f"💤 Нет сигналов {hours}ч. Отдыхай молодой, епт! 🧘" if hours > 0 else "💤 Нет сигналов. Отдыхай молодой, епт! 🧘"
-            send_tg(msg)
-            log(msg)
-        
+                log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
+
         time.sleep(SCAN_INTERVAL)
+
     except Exception as e:
         log(f"Ошибка: {e}")
         time.sleep(60)
