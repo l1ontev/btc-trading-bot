@@ -9,9 +9,17 @@ TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-OI_THRESHOLD = 0.5          # 0.5% — низкий порог для частых сигналов
+OI_THRESHOLD = 0.5
 TIMEFRAME = "15m"
 LIMIT = 100
+
+# Настройки стоп-лосса и тейк-профита
+STOP_ATR_MULTIPLIER = 1.2   # Стоп = цена +/- ATR * 1.2
+RR_RATIO = 2.0              # Риск/прибыль 1:2
+
+# Интервалы
+SCAN_INTERVAL = 300         # 5 минут
+HEARTBEAT_INTERVAL = 3600   # 1 час (3600 секунд)
 
 # ========== TELEGRAM ==========
 def send_tg(text):
@@ -41,7 +49,6 @@ def get_data(symbol):
         return None
 
 def get_oi(symbol):
-    """Изменение объёма за 30 минут (простой OI)"""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=4)
         if len(ohlcv) < 4:
@@ -61,17 +68,21 @@ def get_price(symbol):
         return 0
 
 def add_indicators(df):
-    """Добавляет EMA и MACD"""
-    # EMA 50 и 200
     df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
     
-    # MACD: 12, 26, 9
+    # MACD
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_Histogram'] = df['MACD'] - df['Signal']
+    
+    # ATR для стоп-лосса
+    high_low = df['high'] - df['low']
+    high_close = abs(df['high'] - df['close'].shift())
+    low_close = abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df['ATR'] = tr.rolling(window=14).mean()
     
     return df
 
@@ -81,30 +92,60 @@ def check_signals(df, symbol, oi, price):
     
     ema50 = df['EMA50'].iloc[-1]
     ema200 = df['EMA200'].iloc[-1]
+    atr = df['ATR'].iloc[-1]
     
-    # MACD пересечения
     macd_now = df['MACD'].iloc[-1]
     signal_now = df['Signal'].iloc[-1]
     macd_prev = df['MACD'].iloc[-2]
     signal_prev = df['Signal'].iloc[-2]
     
-    # LONG: MACD пересекает сигнальную снизу вверх + EMA50 > EMA200 + OI падает
+    # LONG
     if (macd_prev <= signal_prev and macd_now > signal_now and 
         ema50 > ema200 and oi <= -OI_THRESHOLD):
-        return {'type': 'LONG', 'entry': price, 'oi': f"{oi:.1f}%"}
+        
+        stop = price - atr * STOP_ATR_MULTIPLIER
+        risk = price - stop
+        take_profit = price + risk * RR_RATIO
+        
+        return {
+            'type': 'LONG',
+            'entry': price,
+            'stop': stop,
+            'take_profit': take_profit,
+            'risk_pct': round((risk / price) * 100, 1),
+            'oi': f"{oi:.1f}%"
+        }
     
-    # SHORT: MACD пересекает сигнальную сверху вниз + EMA50 < EMA200 + OI растёт
+    # SHORT
     if (macd_prev >= signal_prev and macd_now < signal_now and 
         ema50 < ema200 and oi >= OI_THRESHOLD):
-        return {'type': 'SHORT', 'entry': price, 'oi': f"{oi:.1f}%"}
+        
+        stop = price + atr * STOP_ATR_MULTIPLIER
+        risk = stop - price
+        take_profit = price - risk * RR_RATIO
+        
+        return {
+            'type': 'SHORT',
+            'entry': price,
+            'stop': stop,
+            'take_profit': take_profit,
+            'risk_pct': round((risk / price) * 100, 1),
+            'oi': f"{oi:.1f}%"
+        }
     
     return None
+
+# ========== ПЕРЕМЕННЫЕ ДЛЯ HEARTBEAT ==========
+last_heartbeat = 0
+last_signal_time = 0
 
 log("Начинаю сканирование...")
 
 # ========== ОСНОВНОЙ ЦИКЛ ==========
 while True:
     try:
+        signal_found = False
+        
         for symbol in SYMBOLS:
             df = get_data(symbol)
             if df is None:
@@ -116,25 +157,41 @@ while True:
             signal = check_signals(df, symbol, oi, price)
             
             if signal:
+                signal_found = True
+                last_signal_time = time.time()
+                
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
                 msg = f"""{emoji} СИГНАЛ {signal['type']} ({TIMEFRAME})
 
 {symbol}
-💰 Вход: ${price:.0f}
+💰 Вход: ${signal['entry']:.0f}
+📉 Стоп: ${signal['stop']:.0f}
+🎯 Тейк: ${signal['take_profit']:.0f}
+📐 Риск: {signal['risk_pct']}%
 🔥 OI за 30мин: {signal['oi']}
+
 📊 MACD пересечение + EMA + OI
+⚡ Соотношение риск/прибыль: 1:{RR_RATIO}
 
 ⚠️ Управляй рисками!"""
                 send_tg(msg)
-                log(f"🔥 {symbol} {signal['type']} | OI: {signal['oi']}")
-            else:
-                # Диагностика раз в 20 циклов (≈1.5 часа)
-                if int(time.time()) % 3600 < 30:
-                    ema50 = df['EMA50'].iloc[-1]
-                    ema200 = df['EMA200'].iloc[-1]
-                    log(f"Диагностика {symbol}: цена={price:.0f}, OI={oi:.1f}%, EMA50/200={ema50:.0f}/{ema200:.0f}")
+                log(f"🔥 {symbol} {signal['type']} | Риск: {signal['risk_pct']}%")
         
-        time.sleep(300)  # 5 минут
+        # ========== HEARTBEAT: раз в час если нет сигналов ==========
+        current_time = time.time()
+        if not signal_found and (current_time - last_heartbeat) >= HEARTBEAT_INTERVAL:
+            last_heartbeat = current_time
+            hours_since = int((current_time - last_signal_time) / 3600) if last_signal_time > 0 else 0
+            
+            if hours_since > 0:
+                heartbeat_msg = f"💤 Нет сигналов уже {hours_since} час(ов). Отдыхай молодой, епт! 🧘‍♂️"
+            else:
+                heartbeat_msg = f"💤 Нет сигналов. Отдыхай молодой, епт! 🧘‍♂️"
+            
+            send_tg(heartbeat_msg)
+            log(heartbeat_msg)
+        
+        time.sleep(SCAN_INTERVAL)
         
     except Exception as e:
         log(f"Ошибка: {e}")
