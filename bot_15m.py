@@ -1,10 +1,10 @@
-cat > bot_15m.py << 'EOF'
 import time
 import requests
 import ccxt
 import pandas as pd
 from datetime import datetime
 
+# ========== НАСТРОЙКИ ==========
 TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
@@ -17,30 +17,30 @@ STOP_ATR_MULTIPLIER = 1.2
 RR_RATIO = 3.0
 SCAN_INTERVAL = 300
 
+# ========== TELEGRAM ==========
 def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        print("Sent")
+        print("✅ Сообщение отправлено")
     except Exception as e:
-        print(f"TG error: {e}")
+        print(f"❌ Ошибка: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("BOT STARTED")
-send_tg("BOT STARTED (FVG+EMA+OI RR1:3)")
+log("🚀 БОТ ЗАПУЩЕН")
+send_tg("✅ Бот (FVG+EMA+OI, RR 1:3) запущен!")
 
+# ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
-EOF
-cat >> bot_15m.py << 'EOF'
 
 def get_data(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
         return pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
     except Exception as e:
-        log(f"Data error {symbol}: {e}")
+        log(f"Ошибка {symbol}: {e}")
         return None
 
 def add_indicators(df):
@@ -57,7 +57,7 @@ def find_fvg(df, idx):
     if idx < 2 or idx >= len(df) - 1:
         return None
     if df['h'].iloc[idx-1] < df['l'].iloc[idx+1]:
-        return ('bullish', df['h'].iloc[idx-1], df['l'].iloc[idx+1])
+        return ('bullish', df['h'].iloc[idx-1], df['l'].iloc[idx+1'])
     if df['l'].iloc[idx-1] > df['h'].iloc[idx+1]:
         return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1])
     return None
@@ -68,8 +68,6 @@ def get_oi_change(df, idx):
     now = df['v'].iloc[idx]
     past = df['v'].iloc[idx-2]
     return round((now - past) / past * 100, 2) if past != 0 else 0
-EOF
-cat >> bot_15m.py << 'EOF'
 
 def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
     fvg = find_fvg(df, idx)
@@ -100,7 +98,8 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
 
     return None
 
-log("Starting scan...")
+# ========== ОСНОВНОЙ ЦИКЛ ==========
+log("Начинаю сканирование...")
 
 while True:
     try:
@@ -115,20 +114,25 @@ while True:
             price = df['c'].iloc[idx]
             oi = get_oi_change(df, idx)
             ema50 = df['ema50'].iloc[idx]
-            ema200 = df['ema50'].iloc[idx]
+            ema200 = df['ema200'].iloc[idx]
             atr = df['atr'].iloc[idx]
 
             signal = check_signals(df, symbol, oi, price, atr, ema50, ema200, idx)
 
             if signal:
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"{emoji} {signal['type']} {symbol}\nEntry: ${signal['entry']:.0f}\nStop: ${signal['stop']:.0f}\nTP: ${signal['tp']:.0f}\nRisk: {signal['risk_pct']}%\nOI: {oi:.1f}%\nRR 1:3"
+                msg = f"""{emoji} {signal['type']} {symbol}
+💰 Вход: ${signal['entry']:.0f}
+📉 Стоп: ${signal['stop']:.0f}
+🎯 Тейк: ${signal['tp']:.0f}
+📐 Риск: {signal['risk_pct']}%
+🔥 OI: {oi:.1f}%
+⚡ 1:3"""
                 send_tg(msg)
-                log(f"SIGNAL {symbol} {signal['type']}")
+                log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
 
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
-        log(f"Loop error: {e}")
+        log(f"Ошибка: {e}")
         time.sleep(60)
-EOF
