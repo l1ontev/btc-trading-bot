@@ -22,15 +22,15 @@ def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        print("✅ Сообщение отправлено")
+        print("Sent")
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"TG error: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ FVG+EMA+OI (RR 1:3) ЗАПУЩЕН")
-send_tg("✅ Бот (FVG+EMA+OI, RR 1:3) запущен!")
+log("BOT STARTED (FVG+EMA+OI RR1:3)")
+send_tg("BOT STARTED (FVG+EMA+OI RR1:3)")
 
 # ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
@@ -40,27 +40,28 @@ def get_data(symbol):
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
         return pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
     except Exception as e:
-        log(f"Ошибка {symbol}: {e}")
+        log(f"Data error {symbol}: {e}")
         return None
 
 def add_indicators(df):
     df['ema50'] = df['c'].ewm(50).mean()
     df['ema200'] = df['c'].ewm(200).mean()
-    tr = pd.concat([
-        df['h'] - df['l'],
-        abs(df['h'] - df['c'].shift()),
-        abs(df['l'] - df['c'].shift())
-    ], axis=1).max(axis=1)
+    tr1 = df['h'] - df['l']
+    tr2 = abs(df['h'] - df['c'].shift())
+    tr3 = abs(df['l'] - df['c'].shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
     return df
 
 def find_fvg(df, idx):
-    if idx < 2 or idx >= len(df)-1:
+    if idx < 2 or idx >= len(df) - 1:
         return None
+    # bullish FVG
     if df['h'].iloc[idx-1] < df['l'].iloc[idx+1]:
         return ('bullish', df['h'].iloc[idx-1], df['l'].iloc[idx+1'])
+    # bearish FVG
     if df['l'].iloc[idx-1] > df['h'].iloc[idx+1]:
-        return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1])
+        return ('bearish', df['h'].iloc[idx+1], df['l'].iloc[idx-1'])
     return None
 
 def get_oi_change(df, idx):
@@ -68,7 +69,7 @@ def get_oi_change(df, idx):
         return 0
     now = df['v'].iloc[idx]
     past = df['v'].iloc[idx-2]
-    return round((now-past)/past*100, 2) if past != 0 else 0
+    return round((now - past) / past * 100, 2) if past != 0 else 0
 
 def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
     fvg = find_fvg(df, idx)
@@ -84,7 +85,7 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
             'entry': price,
             'stop': stop,
             'tp': price + risk * RR_RATIO,
-            'risk_pct': round(risk/price*100, 2)
+            'risk_pct': round(risk / price * 100, 2)
         }
 
     # SHORT
@@ -96,13 +97,13 @@ def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
             'entry': price,
             'stop': stop,
             'tp': price - risk * RR_RATIO,
-            'risk_pct': round(risk/price*100, 2)
+            'risk_pct': round(risk / price * 100, 2)
         }
 
     return None
 
-# ========== ОСНОВНОЙ ЦИКЛ ==========
-log("Начинаю сканирование...")
+# ========== MAIN LOOP ==========
+log("Starting scan...")
 
 while True:
     try:
@@ -112,36 +113,30 @@ while True:
                 continue
 
             df = add_indicators(df)
-            last_idx = len(df) - 1
+            idx = len(df) - 1
 
-            price = df['c'].iloc[last_idx]
-            oi = get_oi_change(df, last_idx)
-            ema50 = df['ema50'].iloc[last_idx]
-            ema200 = df['ema200'].iloc[last_idx]
-            atr = df['atr'].iloc[last_idx]
+            price = df['c'].iloc[idx]
+            oi = get_oi_change(df, idx)
+            ema50 = df['ema50'].iloc[idx]
+            ema200 = df['ema200'].iloc[idx]
+            atr = df['atr'].iloc[idx]
 
-            signal = check_signals(df, symbol, oi, price, atr, ema50, ema200, last_idx)
+            signal = check_signals(df, symbol, oi, price, atr, ema50, ema200, idx)
 
             if signal:
                 emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} СИГНАЛ {signal['type']} ({TIMEFRAME})
-
-{symbol}
-💰 Вход: ${signal['entry']:.0f}
-📉 Стоп: ${signal['stop']:.0f}
-🎯 Тейк: ${signal['tp']:.0f}
-📐 Риск: {signal['risk_pct']}%
-
-🔥 OI за 30мин: {oi:.1f}%
-📊 FVG + EMA50/200 + OI
-⚡ 1:{RR_RATIO}
-
-⚠️ Управляй рисками!"""
+                msg = f"""{emoji} {signal['type']} {symbol}
+Entry: ${signal['entry']:.0f}
+Stop: ${signal['stop']:.0f}
+TP: ${signal['tp']:.0f}
+Risk: {signal['risk_pct']}%
+OI: {oi:.1f}%
+RR 1:3"""
                 send_tg(msg)
-                log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
+                log(f"SIGNAL {symbol} {signal['type']}")
 
         time.sleep(SCAN_INTERVAL)
 
     except Exception as e:
-        log(f"Ошибка: {e}")
+        log(f"Loop error: {e}")
         time.sleep(60)
