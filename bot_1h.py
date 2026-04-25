@@ -1,21 +1,51 @@
+cd ~/Desktop/crypto_bot
+cat > crypto_bot.py << 'EOF'
 import time
 import requests
 import ccxt
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = "8674379393:AAFDUHr-oF3FHJqIfhhXZKcsN3d37__mnms"
 CHAT_ID = "755816889"
 
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-TIMEFRAME = "1h"
+TIMEFRAME = "4h"
 LIMIT = 200
-OI_THRESHOLD_LONG = -0.8
-OI_THRESHOLD_SHORT = 0.8
-STOP_ATR_MULTIPLIER = 1.2
-RR_RATIO = 3.0
 SCAN_INTERVAL = 600  # 10 минут
+
+# ========== НАСТРОЙКИ ДЛЯ КАЖДОЙ МОНЕТЫ ==========
+SYMBOLS_CONFIG = [
+    {
+        "symbol": "BTC/USDT",
+        "impulse_pct": 2.0,
+        "impulse_period": 10,
+        "fib_level": 0.618,
+        "oi_threshold": -1.0,
+        "stop_mult": 1.5,
+        "rr_ratio": 2.0,
+        "winrate": 90.0,
+        "return": 38.6
+    },
+    {
+        "symbol": "ETH/USDT",
+        "impulse_pct": 2.0,
+        "impulse_period": 10,
+        "fib_level": 0.5,
+        "oi_threshold": -1.0,
+        "stop_mult": 2.0,
+        "rr_ratio": 2.0,
+        "winrate": 68.8,
+        "return": 99.4
+    }
+]
+
+RISK_PER_TRADE = 3.0
+
+# ========== ХРАНИЛИЩЕ ПОСЛЕДНИХ СИГНАЛОВ ==========
+# Формат: {symbol: {'entry_price': float, 'timestamp': datetime}}
+last_signals = {}
 
 # ========== TELEGRAM ==========
 def send_tg(text):
@@ -29,8 +59,8 @@ def send_tg(text):
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ MACD+EMA+OI (1H, RR 1:3) ЗАПУЩЕН")
-send_tg("✅ Бот (MACD+EMA+OI, 1H, RR 1:3) запущен!")
+log("🚀 БОТ BTC+ETH (Импульс+Коррекция+Фибо 4H) ЗАПУЩЕН")
+send_tg("✅ Бот (BTC+ETH, 4H, импульс+коррекция) запущен!")
 
 # ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
@@ -38,118 +68,177 @@ exchange = ccxt.binance({'enableRateLimit': True})
 def get_data(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-        return pd.DataFrame(ohlcv, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+        df = pd.DataFrame(ohlcv, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+        df['ts'] = pd.to_datetime(df['ts'], unit='ms')
+        return df
     except Exception as e:
-        log(f"Ошибка {symbol}: {e}")
+        log(f"Ошибка загрузки {symbol}: {e}")
         return None
 
 def add_indicators(df):
-    # EMA
-    df['ema50'] = df['c'].ewm(50).mean()
-    df['ema200'] = df['c'].ewm(200).mean()
-    
-    # MACD
-    exp1 = df['c'].ewm(span=12, adjust=False).mean()
-    exp2 = df['c'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    
-    # ATR
     tr1 = df['h'] - df['l']
     tr2 = abs(df['h'] - df['c'].shift())
     tr3 = abs(df['l'] - df['c'].shift())
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    
     return df
 
-def get_oi_change(df, idx):
-    """Изменение объёма за 2 часа (2 свечи на 1H)"""
-    if idx < 2:
+def get_oi_change(df, idx, lookback=2):
+    if idx < lookback:
         return 0
     now = df['v'].iloc[idx]
-    past = df['v'].iloc[idx-2]
+    past = df['v'].iloc[idx-lookback]
     if past == 0:
         return 0
     return round((now - past) / past * 100, 2)
 
-def check_signals(df, symbol, oi, price, atr, ema50, ema200, idx):
-    if idx < 2:
+def find_impulse_up(df, idx, impulse_pct, impulse_period):
+    if idx < impulse_period:
+        return None, None
+    start = idx - impulse_period
+    start_price = df['c'].iloc[start]
+    end_price = df['c'].iloc[idx]
+    change = (end_price - start_price) / start_price * 100
+    if change >= impulse_pct:
+        return start, idx
+    return None, None
+
+def find_fib_level(df, impulse_start, impulse_end, fib_level):
+    high = df['h'].iloc[impulse_start:impulse_end+1].max()
+    low = df['l'].iloc[impulse_start:impulse_end+1].min()
+    range_ = high - low
+    return high - range_ * fib_level
+
+def check_correction(df, idx, impulse_start, impulse_end, fib_level):
+    fib_price = find_fib_level(df, impulse_start, impulse_end, fib_level)
+    if fib_price is None:
         return None
     
-    macd_now = df['macd'].iloc[idx]
-    signal_now = df['signal'].iloc[idx]
-    macd_prev = df['macd'].iloc[idx-1]
-    signal_prev = df['signal'].iloc[idx-1]
+    current_price = df['c'].iloc[idx]
+    if abs(current_price - fib_price) / fib_price > 0.003:
+        return None
     
-    # LONG: MACD пересекает сигнальную снизу вверх
-    if (macd_prev <= signal_prev and macd_now > signal_now and 
-        ema50 > ema200 and oi <= OI_THRESHOLD_LONG):
-        
-        stop = price - atr * STOP_ATR_MULTIPLIER
-        risk = price - stop
-        return {
-            'type': 'LONG',
-            'entry': price,
-            'stop': stop,
-            'tp': price + risk * RR_RATIO,
-            'risk_pct': round(risk / price * 100, 2)
-        }
+    body = abs(df['c'].iloc[idx] - df['o'].iloc[idx])
+    if body == 0:
+        return None
+    lower_wick = min(df['o'].iloc[idx], df['c'].iloc[idx]) - df['l'].iloc[idx]
     
-    # SHORT: MACD пересекает сигнальную сверху вниз
-    if (macd_prev >= signal_prev and macd_now < signal_now and 
-        ema50 < ema200 and oi >= OI_THRESHOLD_SHORT):
-        
-        stop = price + atr * STOP_ATR_MULTIPLIER
-        risk = stop - price
-        return {
-            'type': 'SHORT',
-            'entry': price,
-            'stop': stop,
-            'tp': price - risk * RR_RATIO,
-            'risk_pct': round(risk / price * 100, 2)
-        }
-    
+    if lower_wick > body * 1.5:
+        return fib_price
     return None
+
+def is_duplicate_signal(symbol, entry_price, tolerance_pct=1.0):
+    """Проверяет, не отправляли ли уже сигнал с похожей ценой"""
+    if symbol not in last_signals:
+        return False
+    
+    last_entry = last_signals[symbol]['entry_price']
+    last_time = last_signals[symbol]['timestamp']
+    current_time = datetime.now()
+    
+    # Если сигнал был отправлен более 24 часов назад — разрешаем новый
+    if (current_time - last_time).total_seconds() > 24 * 3600:
+        return False
+    
+    # Проверяем, насколько цена отличается от предыдущего сигнала
+    price_diff_pct = abs(entry_price - last_entry) / last_entry * 100
+    return price_diff_pct < tolerance_pct
+
+def save_signal(symbol, entry_price):
+    """Сохраняет информацию о последнем сигнале"""
+    last_signals[symbol] = {
+        'entry_price': entry_price,
+        'timestamp': datetime.now()
+    }
+
+def check_signal(df, cfg):
+    if len(df) < cfg['impulse_period'] + 30:
+        return None
+    
+    idx = len(df) - 1
+    price = df['c'].iloc[idx]
+    oi = get_oi_change(df, idx)
+    atr = df['atr'].iloc[idx] if not pd.isna(df['atr'].iloc[idx]) else 0
+    
+    if atr == 0:
+        return None
+    
+    imp_start, imp_end = find_impulse_up(df, idx, cfg['impulse_pct'], cfg['impulse_period'])
+    if imp_start is None:
+        return None
+    
+    if oi > cfg['oi_threshold']:
+        return None
+    
+    fib_price = check_correction(df, idx, imp_start, imp_end, cfg['fib_level'])
+    if fib_price is None:
+        return None
+    
+    entry = price
+    stop = entry - atr * cfg['stop_mult']
+    risk = entry - stop
+    
+    if risk <= 0:
+        return None
+    
+    tp = entry + risk * cfg['rr_ratio']
+    risk_pct = round(risk / entry * 100, 2)
+    impulse_change = (df['c'].iloc[imp_end] - df['c'].iloc[imp_start]) / df['c'].iloc[imp_start] * 100
+    
+    return {
+        'entry': entry,
+        'stop': stop,
+        'tp': tp,
+        'risk_pct': risk_pct,
+        'oi': oi,
+        'fib_price': fib_price,
+        'impulse_change': impulse_change
+    }
 
 log("Начинаю сканирование...")
 
 while True:
     try:
-        for symbol in SYMBOLS:
+        for cfg in SYMBOLS_CONFIG:
+            symbol = cfg['symbol']
             df = get_data(symbol)
-            if df is None or len(df) < 50:
+            if df is None or len(df) < 80:
                 continue
             
             df = add_indicators(df)
-            idx = len(df) - 1
-            
-            price = df['c'].iloc[idx]
-            oi = get_oi_change(df, idx)
-            ema50 = df['ema50'].iloc[idx]
-            ema200 = df['ema200'].iloc[idx]
-            atr = df['atr'].iloc[idx]
-            
-            signal = check_signals(df, symbol, oi, price, atr, ema50, ema200, idx)
+            signal = check_signal(df, cfg)
             
             if signal:
-                emoji = "🟢" if signal['type'] == 'LONG' else "🔴"
-                msg = f"""{emoji} {signal['type']} {symbol} (1H)
+                # Проверяем, не дубликат ли это
+                if is_duplicate_signal(symbol, signal['entry']):
+                    log(f"⏭️ Пропуск дубликата {symbol} (цена {signal['entry']:.2f})")
+                    continue
+                
+                # Сохраняем сигнал и отправляем
+                save_signal(symbol, signal['entry'])
+                
+                emoji = "🟢"
+                fib_emoji = "🔸" if cfg['fib_level'] == 0.618 else "🔹"
+                msg = f"""{emoji} LONG {symbol} (4H)
 
-💰 Вход: ${signal['entry']:.0f}
-📉 Стоп: ${signal['stop']:.0f}
-🎯 Тейк: ${signal['tp']:.0f}
+📊 Импульс: {signal['impulse_change']:.1f}% за {cfg['impulse_period']} свечей
+{fib_emoji} Фибо {cfg['fib_level']}: ${signal['fib_price']:.2f}
+💰 Вход: ${signal['entry']:.2f}
+📉 Стоп: ${signal['stop']:.2f}
+🎯 Тейк: ${signal['tp']:.2f}
 📐 Риск: {signal['risk_pct']}%
-🔥 OI за 2ч: {oi:.1f}%
-📊 MACD + EMA + OI
-⚡ 1:{RR_RATIO}
+🔥 OI за 8ч: {signal['oi']:.1f}%
+
+⚡ Винрейт бэктеста: {cfg['winrate']:.1f}%
+🎯 RR 1:{cfg['rr_ratio']:.0f}
 
 ⚠️ Управляй рисками!"""
                 send_tg(msg)
-                log(f"🔥 СИГНАЛ {symbol} {signal['type']}")
+                log(f"🔥 СИГНАЛ {symbol} по ${signal['entry']:.2f}")
         
         time.sleep(SCAN_INTERVAL)
         
     except Exception as e:
         log(f"Ошибка: {e}")
         time.sleep(60)
+EOF
