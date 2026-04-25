@@ -1,4 +1,3 @@
-cat > /app/eth_bot.py << 'EOF'
 import time
 import requests
 import ccxt
@@ -156,4 +155,3 @@ while True:
     except Exception as e:
         log(f"Error: {e}")
         time.sleep(60)
-EOF
