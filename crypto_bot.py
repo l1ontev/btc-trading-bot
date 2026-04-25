@@ -1,5 +1,3 @@
-cd ~/Desktop/crypto_bot
-cat > crypto_bot.py << 'EOF'
 import time
 import requests
 import ccxt
@@ -13,7 +11,7 @@ CHAT_ID = "755816889"
 
 TIMEFRAME = "4h"
 LIMIT = 200
-SCAN_INTERVAL = 600  # 10 минут
+SCAN_INTERVAL = 600
 
 # ========== НАСТРОЙКИ ДЛЯ КАЖДОЙ МОНЕТЫ ==========
 SYMBOLS_CONFIG = [
@@ -44,25 +42,22 @@ SYMBOLS_CONFIG = [
 RISK_PER_TRADE = 3.0
 
 # ========== ХРАНИЛИЩЕ ПОСЛЕДНИХ СИГНАЛОВ ==========
-# Формат: {symbol: {'entry_price': float, 'timestamp': datetime}}
 last_signals = {}
 
-# ========== TELEGRAM ==========
 def send_tg(text):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text}, timeout=10)
-        print("✅ Отправлено")
+        print("Sent")
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"TG error: {e}")
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-log("🚀 БОТ BTC+ETH (Импульс+Коррекция+Фибо 4H) ЗАПУЩЕН")
-send_tg("✅ Бот (BTC+ETH, 4H, импульс+коррекция) запущен!")
+log("BOT STARTED (BTC+ETH, Impulse+Fibo+OI)")
+send_tg("BTC+ETH Bot (Impulse+Fibo+OI) started!")
 
-# ========== BINANCE ==========
 exchange = ccxt.binance({'enableRateLimit': True})
 
 def get_data(symbol):
@@ -72,7 +67,7 @@ def get_data(symbol):
         df['ts'] = pd.to_datetime(df['ts'], unit='ms')
         return df
     except Exception as e:
-        log(f"Ошибка загрузки {symbol}: {e}")
+        log(f"Data error {symbol}: {e}")
         return None
 
 def add_indicators(df):
@@ -88,9 +83,7 @@ def get_oi_change(df, idx, lookback=2):
         return 0
     now = df['v'].iloc[idx]
     past = df['v'].iloc[idx-lookback]
-    if past == 0:
-        return 0
-    return round((now - past) / past * 100, 2)
+    return round((now - past) / past * 100, 2) if past != 0 else 0
 
 def find_impulse_up(df, idx, impulse_pct, impulse_period):
     if idx < impulse_period:
@@ -104,6 +97,8 @@ def find_impulse_up(df, idx, impulse_pct, impulse_period):
     return None, None
 
 def find_fib_level(df, impulse_start, impulse_end, fib_level):
+    if impulse_start is None or impulse_end is None:
+        return None
     high = df['h'].iloc[impulse_start:impulse_end+1].max()
     low = df['l'].iloc[impulse_start:impulse_end+1].min()
     range_ = high - low
@@ -128,7 +123,6 @@ def check_correction(df, idx, impulse_start, impulse_end, fib_level):
     return None
 
 def is_duplicate_signal(symbol, entry_price, tolerance_pct=1.0):
-    """Проверяет, не отправляли ли уже сигнал с похожей ценой"""
     if symbol not in last_signals:
         return False
     
@@ -136,16 +130,13 @@ def is_duplicate_signal(symbol, entry_price, tolerance_pct=1.0):
     last_time = last_signals[symbol]['timestamp']
     current_time = datetime.now()
     
-    # Если сигнал был отправлен более 24 часов назад — разрешаем новый
     if (current_time - last_time).total_seconds() > 24 * 3600:
         return False
     
-    # Проверяем, насколько цена отличается от предыдущего сигнала
     price_diff_pct = abs(entry_price - last_entry) / last_entry * 100
     return price_diff_pct < tolerance_pct
 
 def save_signal(symbol, entry_price):
-    """Сохраняет информацию о последнем сигнале"""
     last_signals[symbol] = {
         'entry_price': entry_price,
         'timestamp': datetime.now()
@@ -195,7 +186,7 @@ def check_signal(df, cfg):
         'impulse_change': impulse_change
     }
 
-log("Начинаю сканирование...")
+log("Starting scan...")
 
 while True:
     try:
@@ -209,36 +200,32 @@ while True:
             signal = check_signal(df, cfg)
             
             if signal:
-                # Проверяем, не дубликат ли это
                 if is_duplicate_signal(symbol, signal['entry']):
-                    log(f"⏭️ Пропуск дубликата {symbol} (цена {signal['entry']:.2f})")
+                    log(f"Skip duplicate {symbol} at {signal['entry']:.0f}")
                     continue
                 
-                # Сохраняем сигнал и отправляем
                 save_signal(symbol, signal['entry'])
                 
                 emoji = "🟢"
                 fib_emoji = "🔸" if cfg['fib_level'] == 0.618 else "🔹"
                 msg = f"""{emoji} LONG {symbol} (4H)
 
-📊 Импульс: {signal['impulse_change']:.1f}% за {cfg['impulse_period']} свечей
-{fib_emoji} Фибо {cfg['fib_level']}: ${signal['fib_price']:.2f}
-💰 Вход: ${signal['entry']:.2f}
-📉 Стоп: ${signal['stop']:.2f}
-🎯 Тейк: ${signal['tp']:.2f}
-📐 Риск: {signal['risk_pct']}%
-🔥 OI за 8ч: {signal['oi']:.1f}%
+Impulse: {signal['impulse_change']:.1f}% / {cfg['impulse_period']} candles
+{fib_emoji} Fibo {cfg['fib_level']}: ${signal['fib_price']:.0f}
+Entry: ${signal['entry']:.0f}
+Stop: ${signal['stop']:.0f}
+TP: ${signal['tp']:.0f}
+Risk: {signal['risk_pct']}%
+OI (8h): {signal['oi']:.1f}%
 
-⚡ Винрейт бэктеста: {cfg['winrate']:.1f}%
-🎯 RR 1:{cfg['rr_ratio']:.0f}
+Backtest WR: {cfg['winrate']:.1f}% | RR 1:{cfg['rr_ratio']:.0f}
 
-⚠️ Управляй рисками!"""
+⚠️ DYOR & manage risk!"""
                 send_tg(msg)
-                log(f"🔥 СИГНАЛ {symbol} по ${signal['entry']:.2f}")
+                log(f"SIGNAL {symbol} at ${signal['entry']:.0f}")
         
         time.sleep(SCAN_INTERVAL)
         
     except Exception as e:
-        log(f"Ошибка: {e}")
+        log(f"Error: {e}")
         time.sleep(60)
-EOF
