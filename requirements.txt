@@ -1,4 +1,4 @@
-cat > requirements.txt << 'EOF'
+cat > /app/requirements.txt << 'EOF'
 ccxt
 pandas
 requests
